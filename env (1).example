@@ -1,0 +1,11 @@
+# Copiá este archivo como .env y completá tus valores
+# cp .env.example .env
+
+# API key de Anthropic — conseguila en https://console.anthropic.com
+ANTHROPIC_API_KEY=TU_API_KEY_AQUI
+
+# Costo de nafta por km en guaraníes (ajustá según precio actual)
+COSTO_NAFTA_KM=1200
+
+# Comisión de la plataforma en decimal (0.25 = 25%)
+COMISION_PLATAFORMA=0.25
