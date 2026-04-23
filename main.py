@@ -60,9 +60,13 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 async def startup():
     await database.connect()
-    engine = sqlalchemy.create_engine(DATABASE_URL)
-    metadata.create_all(engine)
-    print("DB inicializada OK")
+    db_url_sync = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+    engine = sqlalchemy.create_engine(db_url_sync.replace("+asyncpg", ""), connect_args={})
+    try:
+        metadata.create_all(engine)
+        print("DB inicializada OK")
+    except Exception as e:
+        print(f"Error creando tablas: {e}")
 
 @app.on_event("shutdown")
 async def shutdown():
