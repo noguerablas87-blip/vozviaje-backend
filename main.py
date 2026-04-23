@@ -62,10 +62,10 @@ def analisis_local_rapido(datos: DatosViaje) -> dict:
     if ganancia < 15000:
         alertas.append("Ganancia neta baja")
 
-    if ganancia >= 40000 and datos.pasajero_calificacion >= 4.5:
+    if ganancia >= 30000 and datos.pasajero_calificacion >= 4.5:
         veredicto = "Conveniente"
         conviene = True
-    elif ganancia >= 20000:
+    elif ganancia >= 12000:
         veredicto = "Regular"
         conviene = True
     else:
