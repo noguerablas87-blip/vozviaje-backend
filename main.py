@@ -118,7 +118,8 @@ def analizar_viaje(datos: DatosViaje):
         try:
             client = anthropic.Anthropic(api_key=api_key)
             prompt = f"""Sos un asistente para conductores de Uber/Bolt en Paraguay.
-Analizá este viaje y dá un análisis breve y útil en español paraguayo.
+Analizá este viaje y dá un análisis breve en español paraguayo. 
+NO uses asteriscos, negritas ni ningún formato markdown. Solo texto plano.
 
 Datos del viaje:
 - Pasajero: {datos.pasajero_nombre} (calificación {datos.pasajero_calificacion}/5, {datos.pasajero_total_viajes} viajes)
@@ -127,10 +128,10 @@ Datos del viaje:
 - Distancia: {datos.distancia_km} km
 - Duración estimada: {datos.duracion_min} minutos
 - Tarifa estimada: Gs. {datos.tarifa_estimada_gs:,}
-- Ganancia neta estimada (tras combustible y comisión): Gs. {calc['ganancia_neta_gs']:,}
+- Ganancia neta estimada: Gs. {calc['ganancia_neta_gs']:,}
 - Hora: {datos.hora_actual or 'no especificada'}
 
-Respondé en máximo 2 oraciones. Indicá si conviene o no, y por qué. Sé directo."""
+Respondé en máximo 3 oraciones. Di claramente si conviene o no conviene, y por qué. Sin markdown."""
 
             message = client.messages.create(
                 model="claude-sonnet-4-20250514",
