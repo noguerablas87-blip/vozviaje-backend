@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -7,76 +7,71 @@ import os
 import random
 import string
 from datetime import datetime, timedelta
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import databases
+import sqlalchemy
 
-app = FastAPI(title="VozViaje Backend", version="2.0.0")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+database = databases.Database(DATABASE_URL)
+metadata = sqlalchemy.MetaData()
+
+usuarios = sqlalchemy.Table(
+    "usuarios", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("celular", sqlalchemy.String(20), unique=True),
+    sqlalchemy.Column("nombre", sqlalchemy.String(100)),
+    sqlalchemy.Column("codigo_verificacion", sqlalchemy.String(6)),
+    sqlalchemy.Column("verificado", sqlalchemy.Boolean, default=False),
+    sqlalchemy.Column("estado", sqlalchemy.String(20), default="trial"),
+    sqlalchemy.Column("fecha_vencimiento", sqlalchemy.DateTime),
+    sqlalchemy.Column("codigo_referido", sqlalchemy.String(10), unique=True),
+    sqlalchemy.Column("referido_por", sqlalchemy.String(10)),
+    sqlalchemy.Column("descuento_proximo_mes", sqlalchemy.Boolean, default=False),
+    sqlalchemy.Column("created_at", sqlalchemy.DateTime, default=datetime.now),
 )
 
-def get_conn():
-    return psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
+pagos = sqlalchemy.Table(
+    "pagos", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("usuario_id", sqlalchemy.Integer),
+    sqlalchemy.Column("monto_gs", sqlalchemy.Integer),
+    sqlalchemy.Column("mes", sqlalchemy.String(7)),
+    sqlalchemy.Column("comprobante", sqlalchemy.Text),
+    sqlalchemy.Column("estado", sqlalchemy.String(20), default="pendiente"),
+    sqlalchemy.Column("created_at", sqlalchemy.DateTime, default=datetime.now),
+)
 
-def init_db():
-    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id SERIAL PRIMARY KEY,
-            celular VARCHAR(20) UNIQUE NOT NULL,
-            nombre VARCHAR(100),
-            codigo_verificacion VARCHAR(6),
-            verificado BOOLEAN DEFAULT FALSE,
-            estado VARCHAR(20) DEFAULT 'trial',
-            fecha_registro TIMESTAMP DEFAULT NOW(),
-            fecha_vencimiento TIMESTAMP,
-            codigo_referido VARCHAR(10) UNIQUE,
-            referido_por VARCHAR(10),
-            descuento_proximo_mes BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS pagos (
-            id SERIAL PRIMARY KEY,
-            usuario_id INTEGER REFERENCES usuarios(id),
-            monto_gs INTEGER NOT NULL,
-            mes VARCHAR(7) NOT NULL,
-            comprobante TEXT,
-            estado VARCHAR(20) DEFAULT 'pendiente',
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS viajes_log (
-            id SERIAL PRIMARY KEY,
-            usuario_id INTEGER REFERENCES usuarios(id),
-            origen TEXT,
-            destino TEXT,
-            distancia_km FLOAT,
-            tarifa_gs INTEGER,
-            ganancia_gs INTEGER,
-            decision VARCHAR(10),
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+viajes_log = sqlalchemy.Table(
+    "viajes_log", metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("usuario_id", sqlalchemy.Integer),
+    sqlalchemy.Column("origen", sqlalchemy.Text),
+    sqlalchemy.Column("destino", sqlalchemy.Text),
+    sqlalchemy.Column("distancia_km", sqlalchemy.Float),
+    sqlalchemy.Column("tarifa_gs", sqlalchemy.Integer),
+    sqlalchemy.Column("ganancia_gs", sqlalchemy.Integer),
+    sqlalchemy.Column("decision", sqlalchemy.String(10)),
+    sqlalchemy.Column("created_at", sqlalchemy.DateTime, default=datetime.now),
+)
+
+app = FastAPI(title="VozViaje Backend", version="2.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.on_event("startup")
-def startup():
-    try:
-        init_db()
-        print("Base de datos inicializada OK")
-    except Exception as e:
-        print(f"Error inicializando DB: {e}")
+async def startup():
+    await database.connect()
+    engine = sqlalchemy.create_engine(DATABASE_URL)
+    metadata.create_all(engine)
+    print("DB inicializada OK")
 
-def generar_codigo():
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
+
+def gen_codigo():
     return ''.join(random.choices(string.digits, k=6))
 
-def generar_codigo_referido():
+def gen_referido():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 COSTO_NAFTA_KM = 1200
@@ -111,121 +106,79 @@ class PagoRequest(BaseModel):
     comprobante: Optional[str] = None
 
 @app.post("/registro")
-def registro(data: RegistroRequest):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM usuarios WHERE celular = %s", (data.celular,))
-        existente = cur.fetchone()
-        codigo = generar_codigo()
-        if existente:
-            cur.execute("UPDATE usuarios SET codigo_verificacion = %s WHERE celular = %s", (codigo, data.celular))
-            conn.commit()
-            return {"mensaje": "Código enviado", "codigo_debug": codigo, "es_nuevo": False}
-        codigo_ref = generar_codigo_referido()
-        fecha_venc = datetime.now() + timedelta(days=30)
-        cur.execute("""
-            INSERT INTO usuarios (celular, nombre, codigo_verificacion, codigo_referido, referido_por, fecha_vencimiento)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (data.celular, data.nombre, codigo, codigo_ref, data.codigo_referido, fecha_venc))
-        conn.commit()
-        return {"mensaje": "Registro exitoso. Código enviado.", "codigo_debug": codigo, "es_nuevo": True}
-    finally:
-        cur.close()
-        conn.close()
+async def registro(data: RegistroRequest):
+    existente = await database.fetch_one(usuarios.select().where(usuarios.c.celular == data.celular))
+    codigo = gen_codigo()
+    if existente:
+        await database.execute(usuarios.update().where(usuarios.c.celular == data.celular).values(codigo_verificacion=codigo))
+        return {"mensaje": "Código enviado", "codigo_debug": codigo, "es_nuevo": False}
+    codigo_ref = gen_referido()
+    fecha_venc = datetime.now() + timedelta(days=30)
+    await database.execute(usuarios.insert().values(
+        celular=data.celular, nombre=data.nombre, codigo_verificacion=codigo,
+        codigo_referido=codigo_ref, referido_por=data.codigo_referido, fecha_vencimiento=fecha_venc
+    ))
+    return {"mensaje": "Registro exitoso. Código enviado.", "codigo_debug": codigo, "es_nuevo": True}
 
 @app.post("/verificar")
-def verificar(data: VerificacionRequest):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM usuarios WHERE celular = %s", (data.celular,))
-        usuario = cur.fetchone()
-        if not usuario:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado")
-        if usuario["codigo_verificacion"] != data.codigo:
-            raise HTTPException(status_code=400, detail="Código incorrecto")
-        cur.execute("UPDATE usuarios SET verificado = TRUE WHERE celular = %s", (data.celular,))
-        conn.commit()
-        dias = max(0, (usuario["fecha_vencimiento"] - datetime.now()).days) if usuario["fecha_vencimiento"] else 30
-        return {
-            "mensaje": "Verificación exitosa",
-            "usuario": {
-                "celular": usuario["celular"],
-                "nombre": usuario["nombre"],
-                "estado": usuario["estado"],
-                "codigo_referido": usuario["codigo_referido"],
-                "dias_restantes": dias,
-                "descuento_proximo_mes": usuario["descuento_proximo_mes"],
-            }
+async def verificar(data: VerificacionRequest):
+    u = await database.fetch_one(usuarios.select().where(usuarios.c.celular == data.celular))
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if u["codigo_verificacion"] != data.codigo:
+        raise HTTPException(status_code=400, detail="Código incorrecto")
+    await database.execute(usuarios.update().where(usuarios.c.celular == data.celular).values(verificado=True))
+    dias = max(0, (u["fecha_vencimiento"] - datetime.now()).days) if u["fecha_vencimiento"] else 30
+    return {
+        "mensaje": "Verificación exitosa",
+        "usuario": {
+            "celular": u["celular"], "nombre": u["nombre"], "estado": u["estado"],
+            "codigo_referido": u["codigo_referido"], "dias_restantes": dias,
+            "descuento_proximo_mes": u["descuento_proximo_mes"],
         }
-    finally:
-        cur.close()
-        conn.close()
+    }
 
 @app.post("/estado-cuenta")
-def estado_cuenta(data: EstadoRequest):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM usuarios WHERE celular = %s", (data.celular,))
-        usuario = cur.fetchone()
-        if not usuario:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado")
-        dias = max(0, (usuario["fecha_vencimiento"] - datetime.now()).days) if usuario["fecha_vencimiento"] else 0
-        estado = usuario["estado"]
-        if dias <= 0 and estado == "trial":
-            cur.execute("UPDATE usuarios SET estado = 'vencido' WHERE celular = %s", (data.celular,))
-            conn.commit()
-            estado = "vencido"
-        cur.execute("""
-            SELECT COUNT(*) as total, SUM(CASE WHEN decision = 'aceptado' THEN 1 ELSE 0 END) as aceptados
-            FROM viajes_log WHERE usuario_id = %s
-        """, (usuario["id"],))
-        stats = cur.fetchone()
-        precio = int(PRECIO_MENSUAL * 0.5) if usuario["descuento_proximo_mes"] else PRECIO_MENSUAL
-        return {
-            "celular": usuario["celular"],
-            "nombre": usuario["nombre"],
-            "estado": estado,
-            "dias_restantes": dias,
-            "codigo_referido": usuario["codigo_referido"],
-            "link_referido": f"https://vozviaje.app/unirse?ref={usuario['codigo_referido']}",
-            "descuento_proximo_mes": usuario["descuento_proximo_mes"],
-            "precio_mes_gs": precio,
-            "stats": {"total_viajes": stats["total"] or 0, "aceptados": stats["aceptados"] or 0}
-        }
-    finally:
-        cur.close()
-        conn.close()
+async def estado_cuenta(data: EstadoRequest):
+    u = await database.fetch_one(usuarios.select().where(usuarios.c.celular == data.celular))
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    dias = max(0, (u["fecha_vencimiento"] - datetime.now()).days) if u["fecha_vencimiento"] else 0
+    estado = u["estado"]
+    if dias <= 0 and estado == "trial":
+        await database.execute(usuarios.update().where(usuarios.c.celular == data.celular).values(estado="vencido"))
+        estado = "vencido"
+    stats = await database.fetch_one(
+        sqlalchemy.text("SELECT COUNT(*) as total, SUM(CASE WHEN decision = 'aceptado' THEN 1 ELSE 0 END) as aceptados FROM viajes_log WHERE usuario_id = :uid"),
+        {"uid": u["id"]}
+    )
+    precio = int(PRECIO_MENSUAL * 0.5) if u["descuento_proximo_mes"] else PRECIO_MENSUAL
+    return {
+        "celular": u["celular"], "nombre": u["nombre"], "estado": estado, "dias_restantes": dias,
+        "codigo_referido": u["codigo_referido"],
+        "link_referido": f"https://vozviaje.app/unirse?ref={u['codigo_referido']}",
+        "descuento_proximo_mes": u["descuento_proximo_mes"], "precio_mes_gs": precio,
+        "stats": {"total_viajes": stats["total"] or 0, "aceptados": stats["aceptados"] or 0}
+    }
 
 @app.post("/confirmar-pago")
-def confirmar_pago(data: PagoRequest):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT * FROM usuarios WHERE celular = %s", (data.celular,))
-        usuario = cur.fetchone()
-        if not usuario:
-            raise HTTPException(status_code=404, detail="Usuario no encontrado")
-        tiene_descuento = usuario["descuento_proximo_mes"]
-        monto = int(PRECIO_MENSUAL * 0.5) if tiene_descuento else PRECIO_MENSUAL
-        mes = datetime.now().strftime("%Y-%m")
-        cur.execute("INSERT INTO pagos (usuario_id, monto_gs, mes, comprobante) VALUES (%s, %s, %s, %s)",
-                    (usuario["id"], monto, mes, data.comprobante))
-        nueva_fecha = datetime.now() + timedelta(days=30)
-        cur.execute("UPDATE usuarios SET estado = 'activo', fecha_vencimiento = %s, descuento_proximo_mes = FALSE WHERE celular = %s",
-                    (nueva_fecha, data.celular))
-        if usuario["referido_por"]:
-            cur.execute("SELECT id FROM usuarios WHERE codigo_referido = %s", (usuario["referido_por"],))
-            ref = cur.fetchone()
-            if ref:
-                cur.execute("UPDATE usuarios SET descuento_proximo_mes = TRUE WHERE id = %s", (ref["id"],))
-        conn.commit()
-        return {"mensaje": "Pago registrado. Cuenta activa 30 días más.", "monto_gs": monto, "descuento_aplicado": tiene_descuento}
-    finally:
-        cur.close()
-        conn.close()
+async def confirmar_pago(data: PagoRequest):
+    u = await database.fetch_one(usuarios.select().where(usuarios.c.celular == data.celular))
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    tiene_descuento = u["descuento_proximo_mes"]
+    monto = int(PRECIO_MENSUAL * 0.5) if tiene_descuento else PRECIO_MENSUAL
+    mes = datetime.now().strftime("%Y-%m")
+    await database.execute(pagos.insert().values(usuario_id=u["id"], monto_gs=monto, mes=mes, comprobante=data.comprobante))
+    nueva_fecha = datetime.now() + timedelta(days=30)
+    await database.execute(usuarios.update().where(usuarios.c.celular == data.celular).values(
+        estado="activo", fecha_vencimiento=nueva_fecha, descuento_proximo_mes=False
+    ))
+    if u["referido_por"]:
+        ref = await database.fetch_one(usuarios.select().where(usuarios.c.codigo_referido == u["referido_por"]))
+        if ref:
+            await database.execute(usuarios.update().where(usuarios.c.id == ref["id"]).values(descuento_proximo_mes=True))
+    return {"mensaje": "Pago registrado. Cuenta activa 30 días más.", "monto_gs": monto, "descuento_aplicado": tiene_descuento}
 
 def analisis_local(datos: DatosViaje) -> dict:
     costo = int(datos.distancia_km * COSTO_NAFTA_KM)
@@ -247,21 +200,16 @@ def analisis_local(datos: DatosViaje) -> dict:
     return {"ganancia_neta_gs": ganancia, "veredicto": v, "conviene": c, "alertas": alertas}
 
 @app.post("/analizar-viaje")
-def analizar_viaje(datos: DatosViaje):
+async def analizar_viaje(datos: DatosViaje):
     usuario_id = None
     if datos.celular:
         try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM usuarios WHERE celular = %s", (datos.celular,))
-            u = cur.fetchone()
+            u = await database.fetch_one(usuarios.select().where(usuarios.c.celular == datos.celular))
             if u:
                 dias = (u["fecha_vencimiento"] - datetime.now()).days if u["fecha_vencimiento"] else 0
                 if dias <= 0 and u["estado"] not in ["activo"]:
                     raise HTTPException(status_code=403, detail="Suscripción vencida. Renová para continuar.")
                 usuario_id = u["id"]
-            cur.close()
-            conn.close()
         except HTTPException:
             raise
         except:
@@ -301,36 +249,33 @@ Máximo 3 oraciones. Di si conviene o no y por qué."""}]
 
     if usuario_id:
         try:
-            conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-            cur = conn.cursor()
-            cur.execute("INSERT INTO viajes_log (usuario_id, origen, destino, distancia_km, tarifa_gs, ganancia_gs) VALUES (%s,%s,%s,%s,%s,%s)",
-                        (usuario_id, datos.origen, datos.destino, datos.distancia_km, datos.tarifa_estimada_gs, calc["ganancia_neta_gs"]))
-            conn.commit()
-            cur.close()
-            conn.close()
+            await database.execute(viajes_log.insert().values(
+                usuario_id=usuario_id, origen=datos.origen, destino=datos.destino,
+                distancia_km=datos.distancia_km, tarifa_gs=datos.tarifa_estimada_gs,
+                ganancia_gs=calc["ganancia_neta_gs"]
+            ))
         except:
             pass
 
-    return {"conviene": calc["conviene"], "veredicto": calc["veredicto"], "ganancia_neta_gs": calc["ganancia_neta_gs"],
-            "resumen_voz": resumen_voz, "analisis_detallado": analisis, "alertas": calc["alertas"]}
+    return {
+        "conviene": calc["conviene"], "veredicto": calc["veredicto"],
+        "ganancia_neta_gs": calc["ganancia_neta_gs"], "resumen_voz": resumen_voz,
+        "analisis_detallado": analisis, "alertas": calc["alertas"],
+    }
 
 @app.post("/registrar-decision")
-def registrar_decision(data: dict):
+async def registrar_decision(data: dict):
     celular = data.get("celular")
     decision = data.get("decision")
     if not celular or not decision:
         return {"ok": True}
     try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM usuarios WHERE celular = %s", (celular,))
-        u = cur.fetchone()
+        u = await database.fetch_one(usuarios.select().where(usuarios.c.celular == celular))
         if u:
-            cur.execute("UPDATE viajes_log SET decision = %s WHERE usuario_id = %s AND decision IS NULL ORDER BY created_at DESC LIMIT 1",
-                        (decision, u[0]))
-            conn.commit()
-        cur.close()
-        conn.close()
+            await database.execute(
+                sqlalchemy.text("UPDATE viajes_log SET decision = :d WHERE usuario_id = :uid AND decision IS NULL ORDER BY created_at DESC LIMIT 1"),
+                {"d": decision, "uid": u["id"]}
+            )
     except:
         pass
     return {"ok": True}
@@ -340,14 +285,12 @@ def root():
     return {"status": "VozViaje backend corriendo", "version": "2.0.0"}
 
 @app.get("/health")
-def health():
+async def health():
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    db_ok = False
-    try:
-        conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-        conn.close()
-        db_ok = True
-    except:
-        pass
-    return {"status": "ok", "ia_configurada": bool(api_key and api_key != "TU_API_KEY_AQUI"),
-            "db_conectada": db_ok, "timestamp": datetime.now().isoformat()}
+    db_ok = database.is_connected
+    return {
+        "status": "ok",
+        "ia_configurada": bool(api_key and api_key != "TU_API_KEY_AQUI"),
+        "db_conectada": db_ok,
+        "timestamp": datetime.now().isoformat()
+    }
