@@ -60,13 +60,50 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 async def startup():
     await database.connect()
-    db_url_sync = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
-    engine = sqlalchemy.create_engine(db_url_sync.replace("+asyncpg", ""), connect_args={})
-    try:
-        metadata.create_all(engine)
-        print("DB inicializada OK")
-    except Exception as e:
-        print(f"Error creando tablas: {e}")
+    # Crear tablas directamente con asyncpg
+    import asyncpg
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id SERIAL PRIMARY KEY,
+            celular VARCHAR(20) UNIQUE NOT NULL,
+            nombre VARCHAR(100),
+            codigo_verificacion VARCHAR(6),
+            verificado BOOLEAN DEFAULT FALSE,
+            estado VARCHAR(20) DEFAULT 'trial',
+            fecha_vencimiento TIMESTAMP,
+            codigo_referido VARCHAR(10) UNIQUE,
+            referido_por VARCHAR(10),
+            descuento_proximo_mes BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS pagos (
+            id SERIAL PRIMARY KEY,
+            usuario_id INTEGER,
+            monto_gs INTEGER,
+            mes VARCHAR(7),
+            comprobante TEXT,
+            estado VARCHAR(20) DEFAULT 'pendiente',
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS viajes_log (
+            id SERIAL PRIMARY KEY,
+            usuario_id INTEGER,
+            origen TEXT,
+            destino TEXT,
+            distancia_km FLOAT,
+            tarifa_gs INTEGER,
+            ganancia_gs INTEGER,
+            decision VARCHAR(10),
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+    """)
+    await conn.close()
+    print("DB inicializada OK")
+
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
 
 @app.on_event("shutdown")
 async def shutdown():
