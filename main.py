@@ -186,9 +186,10 @@ async def estado_cuenta(data: EstadoRequest):
     if dias <= 0 and estado == "trial":
         await database.execute(usuarios.update().where(usuarios.c.celular == data.celular).values(estado="vencido"))
         estado = "vencido"
-   stats = await database.fetch_one(
-    sqlalchemy.text("SELECT COUNT(*) as total, SUM(CASE WHEN decision = 'aceptado' THEN 1 ELSE 0 END) as aceptados FROM viajes_log WHERE usuario_id = :uid").bindparams(uid=u["id"])
-)
+    stats = await database.fetch_one(
+        sqlalchemy.text("SELECT COUNT(*) as total, SUM(CASE WHEN decision = 'aceptado' THEN 1 ELSE 0 END) as aceptados FROM viajes_log WHERE usuario_id = :uid"),
+        {"uid": u["id"]}
+    )
     precio = int(PRECIO_MENSUAL * 0.5) if u["descuento_proximo_mes"] else PRECIO_MENSUAL
     return {
         "celular": u["celular"], "nombre": u["nombre"], "estado": estado, "dias_restantes": dias,
