@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -54,13 +54,14 @@ viajes_log = sqlalchemy.Table(
     sqlalchemy.Column("created_at", sqlalchemy.DateTime, default=datetime.now),
 )
 
-app = FastAPI(title="VozViaje Backend", version="2.0.0")
+app = FastAPI(title="VozViaje Backend", version="2.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+ADMIN_KEY = os.getenv("ADMIN_KEY", "vozviaje2024")  # Cambiá esto en Railway vars
 
 @app.on_event("startup")
 async def startup():
     await database.connect()
-    # Crear tablas directamente con asyncpg
     import asyncpg
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("""
@@ -100,10 +101,6 @@ async def startup():
     """)
     await conn.close()
     print("DB inicializada OK")
-
-@app.on_event("shutdown")
-async def shutdown():
-    await database.disconnect()
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -221,6 +218,85 @@ async def confirmar_pago(data: PagoRequest):
             await database.execute(usuarios.update().where(usuarios.c.id == ref["id"]).values(descuento_proximo_mes=True))
     return {"mensaje": "Pago registrado. Cuenta activa 30 días más.", "monto_gs": monto, "descuento_aplicado": tiene_descuento}
 
+# ─── PANEL ADMIN ──────────────────────────────────────────────────────────────
+
+@app.get("/admin/usuarios")
+async def admin_usuarios(key: str = Query(...)):
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    rows = await database.fetch_all(
+        usuarios.select().order_by(usuarios.c.created_at.desc())
+    )
+    result = []
+    for u in rows:
+        dias = max(0, (u["fecha_vencimiento"] - datetime.now()).days) if u["fecha_vencimiento"] else 0
+        result.append({
+            "id": u["id"],
+            "celular": u["celular"],
+            "nombre": u["nombre"],
+            "estado": u["estado"],
+            "verificado": u["verificado"],
+            "dias_restantes": dias,
+            "codigo_referido": u["codigo_referido"],
+            "referido_por": u["referido_por"],
+            "descuento_proximo_mes": u["descuento_proximo_mes"],
+            "created_at": u["created_at"].isoformat() if u["created_at"] else None,
+        })
+    return {"total": len(result), "usuarios": result}
+
+@app.get("/admin/pagos")
+async def admin_pagos(key: str = Query(...)):
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    rows = await database.fetch_all(
+        sqlalchemy.text("""
+            SELECT p.*, u.celular, u.nombre
+            FROM pagos p
+            JOIN usuarios u ON u.id = p.usuario_id
+            ORDER BY p.created_at DESC
+        """)
+    )
+    return {"total": len(rows), "pagos": [dict(r) for r in rows]}
+
+@app.get("/admin/stats")
+async def admin_stats(key: str = Query(...)):
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    total = await database.fetch_one(sqlalchemy.text("SELECT COUNT(*) as n FROM usuarios"))
+    activos = await database.fetch_one(sqlalchemy.text("SELECT COUNT(*) as n FROM usuarios WHERE estado = 'activo'"))
+    trial = await database.fetch_one(sqlalchemy.text("SELECT COUNT(*) as n FROM usuarios WHERE estado = 'trial'"))
+    vencidos = await database.fetch_one(sqlalchemy.text("SELECT COUNT(*) as n FROM usuarios WHERE estado = 'vencido'"))
+    ingresos = await database.fetch_one(sqlalchemy.text("SELECT COALESCE(SUM(monto_gs), 0) as total FROM pagos"))
+    viajes = await database.fetch_one(sqlalchemy.text("SELECT COUNT(*) as n FROM viajes_log"))
+    return {
+        "usuarios": {
+            "total": total["n"],
+            "activos": activos["n"],
+            "trial": trial["n"],
+            "vencidos": vencidos["n"],
+        },
+        "ingresos_totales_gs": ingresos["total"],
+        "viajes_analizados": viajes["n"],
+    }
+
+@app.post("/admin/activar")
+async def admin_activar(data: dict, key: str = Query(...)):
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    celular = data.get("celular")
+    if not celular:
+        raise HTTPException(status_code=400, detail="Falta celular")
+    u = await database.fetch_one(usuarios.select().where(usuarios.c.celular == celular))
+    if not u:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    nueva_fecha = datetime.now() + timedelta(days=30)
+    await database.execute(
+        usuarios.update().where(usuarios.c.celular == celular).values(estado="activo", fecha_vencimiento=nueva_fecha)
+    )
+    return {"mensaje": f"Cuenta {celular} activada por 30 días"}
+
+# ─── ENDPOINTS EXISTENTES ─────────────────────────────────────────────────────
+
 def analisis_local(datos: DatosViaje) -> dict:
     costo = int(datos.distancia_km * COSTO_NAFTA_KM)
     comision = int(datos.tarifa_estimada_gs * 0.25)
@@ -323,7 +399,7 @@ async def registrar_decision(data: dict):
 
 @app.get("/")
 def root():
-    return {"status": "VozViaje backend corriendo", "version": "2.0.0"}
+    return {"status": "VozViaje backend corriendo", "version": "2.1.0"}
 
 @app.get("/health")
 async def health():
