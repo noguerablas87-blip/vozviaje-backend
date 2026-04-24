@@ -154,6 +154,7 @@ async def registro(data: RegistroRequest):
     fecha_venc = datetime.now() + timedelta(days=30)
     await database.execute(usuarios.insert().values(
         celular=data.celular, nombre=data.nombre, codigo_verificacion=codigo,
+        estado='trial', descuento_proximo_mes=False,
         codigo_referido=codigo_ref, referido_por=data.codigo_referido, fecha_vencimiento=fecha_venc
     ))
     return {"mensaje": "Registro exitoso. Código enviado.", "codigo_debug": codigo, "es_nuevo": True}
@@ -187,8 +188,11 @@ async def estado_cuenta(data: EstadoRequest):
         await database.execute(usuarios.update().where(usuarios.c.celular == data.celular).values(estado="vencido"))
         estado = "vencido"
     stats = await database.fetch_one(
-        sqlalchemy.text("SELECT COUNT(*) as total, SUM(CASE WHEN decision = 'aceptado' THEN 1 ELSE 0 END) as aceptados FROM viajes_log WHERE usuario_id = :uid"),
-        {"uid": u["id"]}
+        sqlalchemy.text(
+            "SELECT COUNT(*) as total, "
+            "SUM(CASE WHEN decision = 'aceptado' THEN 1 ELSE 0 END) as aceptados "
+            "FROM viajes_log WHERE usuario_id = :uid"
+        ).bindparams(uid=u["id"])
     )
     precio = int(PRECIO_MENSUAL * 0.5) if u["descuento_proximo_mes"] else PRECIO_MENSUAL
     return {
